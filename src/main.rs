@@ -1,5 +1,4 @@
 use core::panic;
-use std::collections::HashMap;
 use std::io::{stdin, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{self, channel, Sender};
@@ -44,19 +43,19 @@ impl Game {
         }
     }
 
-    fn winner_check(&mut self, winner_id: usize) {
-        self.horizontal_check(winner_id);
-        [14, 15, 16].map(|shift| self.shift_check(winner_id, shift));
+    fn winner_check(&mut self, winner_id: usize, winner_color: usize) {
+        self.horizontal_check(winner_id, winner_color);
+        [14, 15, 16].map(|shift| self.shift_check(winner_id, winner_color, shift));
     }
 
-    fn horizontal_check(&mut self, winner_id: usize) {
+    fn horizontal_check(&mut self, winner_id: usize, winner_color: usize) {
         let rows = self.field.chunks(15);
         for row in rows {
             let mut win_line = vec![];
             let mut idx = 0;
             while idx < row.len() {
                 let cell_color = row[idx];
-                if cell_color == winner_id {
+                if cell_color == winner_color {
                     win_line.push(idx);
                 } else {
                     win_line = vec![];
@@ -70,18 +69,18 @@ impl Game {
         }
     }
 
-    fn shift_check(&mut self, winner_id: usize, shift: usize) {
+    fn shift_check(&mut self, winner_id: usize, winner_color: usize, shift: usize) {
         let mut idx = 0;
         let mut win_line = vec![];
         while idx < self.field.len() {
-            if self.field[idx] != winner_id {
+            if self.field[idx] != winner_color {
                 idx += 1;
                 win_line = vec![];
                 continue;
             }
             win_line.push(idx);
             let mut i = idx;
-            while i + shift < self.field.len() && self.field[i + shift] == winner_id {
+            while i + shift < self.field.len() && self.field[i + shift] == winner_color {
                 win_line.push(i);
                 if win_line.len() >= 5 {
                     self.winner = Some(winner_id);
@@ -128,10 +127,10 @@ fn handle_game_action(data: &[u8], mut stream: &TcpStream, game: Arc<Mutex<Game>
 
         Ok(GameAction::Move(move_id, name)) => {
             let mut state = game.lock().unwrap();
-            let player_id = if state.players.as_ref().unwrap()[0].name == name {
-                0_usize
+            let (player_id, second_player_id) = if state.players.as_ref().unwrap()[0].name == name {
+                (0_usize, 1_usize)
             } else {
-                1_usize
+                (1_usize, 0_usize)
             };
             if player_id != state.active_player.unwrap() {
                 return;
@@ -146,10 +145,13 @@ fn handle_game_action(data: &[u8], mut stream: &TcpStream, game: Arc<Mutex<Game>
                 }
                 None => {
                     state.active_player = Some(player_id);
+                    state.players.as_mut().unwrap()[player_id].color = Some(1_usize);
+                    state.players.as_mut().unwrap()[second_player_id].color = Some(0_usize);
                 }
             }
+            let player_color = state.players.as_ref().unwrap()[player_id].color.unwrap();
             state.field[move_id] = player_id;
-            game.lock().unwrap().winner_check(player_id);
+            game.lock().unwrap().winner_check(player_id, player_color);
         }
         Err(e) => {
             panic!("{}", e)
