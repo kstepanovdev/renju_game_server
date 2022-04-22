@@ -2,7 +2,7 @@ use core::panic;
 use std::io::{stdin, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{self, channel, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
 use serde::{Deserialize, Serialize};
@@ -94,7 +94,7 @@ impl Game {
     }
 }
 
-fn handle_client(mut stream: TcpStream, game: Arc<Mutex<Game>>, rx: Sender<GameAction>) {
+fn handle_client(mut stream: TcpStream, game: Arc<RwLock<Game>>, rx: Sender<GameAction>) {
     let mut data = [0; 1024];
     match stream.read(&mut data) {
         Ok(size) => {
@@ -110,23 +110,22 @@ fn handle_client(mut stream: TcpStream, game: Arc<Mutex<Game>>, rx: Sender<GameA
     }
 }
 
-fn handle_game_action(data: &[u8], mut stream: &TcpStream, game: Arc<Mutex<Game>>) {
+fn handle_game_action(data: &[u8], mut stream: &TcpStream, game: Arc<RwLock<Game>>) {
     match bincode::deserialize(data) {
         Ok(GameAction::Connect(name)) => {
             let new_player = Player::new(name);
-            let mut state = game.lock().unwrap();
-            match &mut state.players {
-                Some(players) => {
-                    players.push(new_player);
+            match &game.read().unwrap().players {
+                Some(_players) => {
+                    game.write().unwrap().players.as_mut().unwrap().push(new_player);
                 }
                 None => {
-                    state.players = Some(vec![new_player]);
+                    game.write().unwrap().players = Some(vec![new_player]);
                 }
             }
         }
 
         Ok(GameAction::Move(move_id, name)) => {
-            let mut state = game.lock().unwrap();
+            let mut state = game.write().unwrap();
             let (player_id, second_player_id) = if state.players.as_ref().unwrap()[0].name == name {
                 (0_usize, 1_usize)
             } else {
@@ -135,23 +134,23 @@ fn handle_game_action(data: &[u8], mut stream: &TcpStream, game: Arc<Mutex<Game>
             if player_id != state.active_player.unwrap() {
                 return;
             }
-            match &mut state.active_player {
+            match state.active_player {
                 Some(active_player_id) => {
-                    if active_player_id == &mut 0_usize {
-                        *active_player_id = 1
+                    if active_player_id == 0_usize {
+                        state.active_player = Some(1)
                     } else {
-                        *active_player_id = 0
+                        state.active_player = Some(0)
                     };
                 }
                 None => {
-                    state.active_player = Some(player_id);
+                    state.active_player = Some(second_player_id);
                     state.players.as_mut().unwrap()[player_id].color = Some(1_usize);
                     state.players.as_mut().unwrap()[second_player_id].color = Some(0_usize);
                 }
             }
             let player_color = state.players.as_ref().unwrap()[player_id].color.unwrap();
             state.field[move_id] = player_id;
-            game.lock().unwrap().winner_check(player_id, player_color);
+            state.winner_check(player_id, player_color);
         }
         Err(e) => {
             panic!("{}", e)
@@ -175,23 +174,17 @@ fn main() {
         }
     };
 
-    let game = Arc::new(Mutex::new(Game::new()));
+    let game = Arc::new(RwLock::new(Game::new()));
     println!("Server listening on ip:port = {}", address);
+    let listener = TcpListener::bind(address).unwrap();
     let (tx, rx) = channel();
-    loop {
-        let listener = TcpListener::bind(address).unwrap();
-        match listener.accept() {
-            Ok((stream, _addr)) => {
-                let tx_copy = tx.clone();
-                let game_state = Arc::clone(&game);
-                thread::spawn(move || {
-                    handle_client(stream, game_state, tx_copy);
-                });
-            }
-            Err(e) => {
-                drop(listener);
-                println!("couldn't get client: {:?}", e);
-            }
-        }
+
+    for stream in listener.incoming() {
+        let stream = stream.unwrap();
+        let tx_copy = tx.clone();
+        let game_state = Arc::clone(&game);
+        thread::spawn(move || {
+            handle_client(stream, game_state, tx_copy);
+        });
     }
 }
