@@ -24,6 +24,11 @@ impl Player {
 enum GameAction {
     Connect(String),
     Move(usize, String),
+    Reset,
+}
+
+enum ServerResponse {
+    Ok(usize, usize),
 }
 
 struct Game {
@@ -41,6 +46,13 @@ impl Game {
             winner: None,
             field: [0; 255],
         }
+    }
+
+    fn reset(&mut self) {
+        self.players = None;
+        self.active_player = None;
+        self.winner = None;
+        self.field = [0; 255];
     }
 
     fn winner_check(&mut self, winner_id: usize, winner_color: usize) {
@@ -112,11 +124,20 @@ fn handle_client(mut stream: TcpStream, game: Arc<RwLock<Game>>, rx: Sender<Game
 
 fn handle_game_action(data: &[u8], mut stream: &TcpStream, game: Arc<RwLock<Game>>) {
     match bincode::deserialize(data) {
+        Ok(GameAction::Reset) => {
+            game.write().unwrap().reset();
+        }
+
         Ok(GameAction::Connect(name)) => {
             let new_player = Player::new(name);
             match &game.read().unwrap().players {
                 Some(_players) => {
-                    game.write().unwrap().players.as_mut().unwrap().push(new_player);
+                    game.write()
+                        .unwrap()
+                        .players
+                        .as_mut()
+                        .unwrap()
+                        .push(new_player);
                 }
                 None => {
                     game.write().unwrap().players = Some(vec![new_player]);
