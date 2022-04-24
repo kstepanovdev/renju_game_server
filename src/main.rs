@@ -208,4 +208,15 @@ fn main() {
             handle_client(stream, game_state, tx_copy);
         });
     }
+
+    loop {
+        match rx.try_recv() {
+            Ok(game_action) => {
+                todo!()
+            }
+            Err(e) => {
+                todo!()
+            }
+        }
+    }
 }
