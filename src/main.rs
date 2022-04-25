@@ -1,38 +1,46 @@
 use core::panic;
 use std::io::{stdin, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::mpsc::{self, channel, Sender};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::mpsc::{self, channel, Receiver, Sender};
+use std::sync::{Arc, RwLock};
 use std::thread;
 
+use bincode::Error;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-#[derive(Clone)]
+#[derive(Debug)]
 struct Player {
     name: String,
     color: Option<usize>,
+    stream: TcpStream,
 }
 
 impl Player {
-    fn new(name: String) -> Self {
-        Player { name, color: None }
+    fn new(name: String, stream: TcpStream) -> Self {
+        Player {
+            name,
+            color: None,
+            stream,
+        }
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 enum GameAction {
     Connect(String),
     Move(usize, String),
     Reset,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
 enum ServerResponse {
-    Ok(usize, usize),
+    Ok,
+    Fail,
+    Move(usize, usize),
 }
 
 struct Game {
-    players: Option<Vec<Player>>,
+    players: Vec<Player>,
     active_player: Option<usize>,
     winner: Option<usize>,
     field: [usize; 255],
@@ -41,7 +49,7 @@ struct Game {
 impl Game {
     fn new() -> Self {
         Game {
-            players: None,
+            players: vec![],
             active_player: None,
             winner: None,
             field: [0; 255],
@@ -49,7 +57,6 @@ impl Game {
     }
 
     fn reset(&mut self) {
-        self.players = None;
         self.active_player = None;
         self.winner = None;
         self.field = [0; 255];
@@ -106,11 +113,11 @@ impl Game {
     }
 }
 
-fn handle_client(mut stream: TcpStream, game: Arc<RwLock<Game>>, rx: Sender<GameAction>) {
+fn handle_client(mut stream: TcpStream, game: Arc<RwLock<Game>>, tx: Sender<ServerResponse>) {
     let mut data = [0; 1024];
     match stream.read(&mut data) {
         Ok(size) => {
-            handle_game_action(&data, &stream, game);
+            handle_game_action(&data, stream, game, tx);
         }
         Err(_) => {
             println!(
@@ -122,32 +129,30 @@ fn handle_client(mut stream: TcpStream, game: Arc<RwLock<Game>>, rx: Sender<Game
     }
 }
 
-fn handle_game_action(data: &[u8], mut stream: &TcpStream, game: Arc<RwLock<Game>>) {
-    match bincode::deserialize(data) {
+fn handle_game_action(
+    data: &[u8],
+    stream: TcpStream,
+    game: Arc<RwLock<Game>>,
+    tx: Sender<ServerResponse>,
+) {
+    let data = bincode::deserialize::<GameAction>(data);
+    match data {
         Ok(GameAction::Reset) => {
             game.write().unwrap().reset();
+            tx.send(ServerResponse::Ok).unwrap();
         }
 
         Ok(GameAction::Connect(name)) => {
-            let new_player = Player::new(name);
-            match &game.read().unwrap().players {
-                Some(_players) => {
-                    game.write()
-                        .unwrap()
-                        .players
-                        .as_mut()
-                        .unwrap()
-                        .push(new_player);
-                }
-                None => {
-                    game.write().unwrap().players = Some(vec![new_player]);
-                }
-            }
+            let new_player = Player::new(name, stream);
+            let mut game = game.write().unwrap();
+            game.players.push(new_player);
+            tracing::error!("{:?}", &game.players);
+            tx.send(ServerResponse::Ok).unwrap();
         }
 
         Ok(GameAction::Move(move_id, name)) => {
             let mut state = game.write().unwrap();
-            let (player_id, second_player_id) = if state.players.as_ref().unwrap()[0].name == name {
+            let (player_id, second_player_id) = if state.players[0].name == name {
                 (0_usize, 1_usize)
             } else {
                 (1_usize, 0_usize)
@@ -165,13 +170,15 @@ fn handle_game_action(data: &[u8], mut stream: &TcpStream, game: Arc<RwLock<Game
                 }
                 None => {
                     state.active_player = Some(second_player_id);
-                    state.players.as_mut().unwrap()[player_id].color = Some(1_usize);
-                    state.players.as_mut().unwrap()[second_player_id].color = Some(0_usize);
+                    state.players[player_id].color = Some(1_usize);
+                    state.players[second_player_id].color = Some(0_usize);
                 }
             }
-            let player_color = state.players.as_ref().unwrap()[player_id].color.unwrap();
+            let player_color = state.players[player_id].color.unwrap();
             state.field[move_id] = player_id;
             state.winner_check(player_id, player_color);
+            tx.send(ServerResponse::Move(move_id, player_color))
+                .unwrap();
         }
         Err(e) => {
             panic!("{}", e)
@@ -180,6 +187,7 @@ fn handle_game_action(data: &[u8], mut stream: &TcpStream, game: Arc<RwLock<Game
 }
 
 fn main() {
+    tracing_subscriber::fmt::init();
     println!("Enter desired IP or leave it blank to keep a default value:");
     let mut buffer = String::new();
     let address = match stdin().read_line(&mut buffer) {
@@ -198,24 +206,45 @@ fn main() {
     let game = Arc::new(RwLock::new(Game::new()));
     println!("Server listening on ip:port = {}", address);
     let listener = TcpListener::bind(address).unwrap();
-    let (tx, rx) = channel();
+    let (tx, rx): (Sender<ServerResponse>, Receiver<ServerResponse>) = channel();
+    let mut clients = vec![];
 
     for stream in listener.incoming() {
+        println!(
+            "Client {:?} connected",
+            stream.as_ref().unwrap().peer_addr()
+        );
         let stream = stream.unwrap();
+        clients.push(stream.try_clone().unwrap());
         let tx_copy = tx.clone();
         let game_state = Arc::clone(&game);
         thread::spawn(move || {
             handle_client(stream, game_state, tx_copy);
         });
-    }
 
-    loop {
-        match rx.try_recv() {
-            Ok(game_action) => {
-                todo!()
-            }
+        match rx.recv() {
+            Ok(response) => match response {
+                ServerResponse::Move(move_id, player_color) => {
+                    let resp =
+                        bincode::serialize(&ServerResponse::Move(move_id, player_color)).unwrap();
+                    tracing::error!("MOVEMOVEMOVEMOVEMOVE");
+                    for mut client in &clients {
+                        client.write_all(&resp).unwrap();
+                    }
+                }
+                ServerResponse::Ok => {
+                    tracing::error!("OKOKOKOK");
+                    for mut client in &clients {
+                        let resp = bincode::serialize(&ServerResponse::Ok).unwrap();
+                        client.write_all(&resp).unwrap();
+                    }
+                }
+                _ => {
+                    tracing::error!("?????????");
+                }
+            },
             Err(e) => {
-                todo!()
+                tracing::error!("Failed to receive a value from the rx: {}", e);
             }
         }
     }
