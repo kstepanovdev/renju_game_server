@@ -1,21 +1,28 @@
-use core::panic;
+use core::{panic, time};
+use std::collections::HashMap;
 use std::io::{stdin, Read, Write};
-use std::net::TcpListener;
+use std::net::{IpAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, RwLock};
+use std::thread::sleep;
 
 use serde::{Deserialize, Serialize};
 use threadpool::ThreadPool;
 
 #[derive(Debug)]
 struct Player {
+    ip: IpAddr,
     name: String,
     color: Option<usize>,
 }
 
 impl Player {
-    fn new(name: String) -> Self {
-        Player { name, color: None }
+    fn new(name: String, ip: IpAddr) -> Self {
+        Player {
+            name,
+            color: None,
+            ip,
+        }
     }
 }
 
@@ -28,9 +35,10 @@ enum GameAction {
 
 #[derive(Serialize, Deserialize, Debug)]
 enum ServerResponse {
-    Ok,
-    Fail,
+    Ok(IpAddr),
+    Fail(String, IpAddr),
     Move(usize, usize),
+    Reset,
 }
 
 struct Game {
@@ -107,24 +115,27 @@ impl Game {
     }
 }
 
-fn handle_game_action(data: &[u8], game: Arc<RwLock<Game>>) -> ServerResponse {
+fn handle_game_action(data: &[u8], game: Arc<RwLock<Game>>, player_ip: IpAddr) -> ServerResponse {
     let data = bincode::deserialize::<GameAction>(data);
     match data {
         Ok(GameAction::Reset) => {
             game.write().unwrap().reset();
-            ServerResponse::Ok
+            ServerResponse::Reset
         }
 
         Ok(GameAction::Connect(name)) => {
-            let new_player = Player::new(name);
+            let new_player = Player::new(name, player_ip);
             let mut game = game.write().unwrap();
             game.players.push(new_player);
-            ServerResponse::Ok
+            ServerResponse::Ok(player_ip)
         }
 
         Ok(GameAction::Move(move_id, name)) => {
-            let player_color = 1;
-            ServerResponse::Move(move_id, player_color)
+            ServerResponse::Move(move_id, 1)
+
+            // if game.read().unwrap().players.len() < 2 {
+            //     return ServerResponse::Fail("Wait for a second player to connect".to_string(), player_ip)
+            // }
 
             // let mut state = game.write().unwrap();
             // let (player_id, second_player_id) = if state.players[0].name == name {
@@ -132,10 +143,9 @@ fn handle_game_action(data: &[u8], game: Arc<RwLock<Game>>) -> ServerResponse {
             // } else {
             //     (1_usize, 0_usize)
             // };
-            // // TODO: enable this
-            // // if player_id != state.active_player.unwrap() {
-            //     // return;
-            // // }
+            // if player_id != state.active_player.unwrap() {
+            //     return ServerResponse::Fail("It's not your move".to_string(), player_ip);
+            // }
             // match state.active_player {
             //     Some(active_player_id) => {
             //         if active_player_id == 0_usize {
@@ -182,7 +192,7 @@ fn main() {
     println!("Server listening on ip:port = {}", address);
 
     let game = Arc::new(RwLock::new(Game::new()));
-    let mut clients = vec![];
+    let mut clients: HashMap<IpAddr, TcpStream> = HashMap::new();
     let pool = ThreadPool::new(4);
 
     let (tx, rx): (Sender<ServerResponse>, Receiver<ServerResponse>) = channel();
@@ -192,14 +202,15 @@ fn main() {
             stream.as_ref().unwrap().peer_addr()
         );
 
-        clients.push(stream.as_mut().unwrap().try_clone().unwrap());
+        let player_ip = stream.as_ref().unwrap().peer_addr().unwrap().ip();
+        clients.insert(player_ip, stream.as_mut().unwrap().try_clone().unwrap());
 
         let game = Arc::clone(&game);
         // let mut stream_clone = stream.unwrap().try_clone();
         pool.execute(move || loop {
             let arc_game = Arc::clone(&game);
 
-            let mut data = [0; 32];
+            let mut data = [0; 64];
             match stream.as_mut().unwrap().read(&mut data) {
                 Ok(size) => {
                     tracing::warn!(size);
@@ -207,7 +218,7 @@ fn main() {
                         return;
                     }
 
-                    let response = handle_game_action(&data, arc_game);
+                    let response = handle_game_action(&data, arc_game, player_ip);
                     if let Err(e) = tx.send(response) {
                         tracing::error!("{}", e)
                     };
@@ -216,6 +227,7 @@ fn main() {
                     println!("Data read error: {}", e);
                 }
             }
+            sleep(time::Duration::from_millis(300));
         });
 
         loop {
@@ -224,16 +236,34 @@ fn main() {
                     ServerResponse::Move(move_id, player_color) => {
                         let resp = bincode::serialize(&ServerResponse::Move(move_id, player_color))
                             .unwrap();
-                        for mut client in &clients {
+                        for (ip, mut client) in &clients {
                             tracing::error!("{:?}", resp);
                             client.write_all(&resp).unwrap();
                         }
                     }
-                    ServerResponse::Ok => {
-                        for mut client in &clients {
-                            let resp = bincode::serialize(&ServerResponse::Ok).unwrap();
+                    ServerResponse::Reset => {
+                        let resp = bincode::serialize(&ServerResponse::Reset).unwrap();
+                        for (ip, mut client) in &clients {
+                            tracing::error!("{:?}", resp);
                             client.write_all(&resp).unwrap();
                         }
+                    }
+                    ServerResponse::Ok(player_ip) => {
+                        let resp = bincode::serialize(&ServerResponse::Ok(player_ip)).unwrap();
+                        clients
+                            .get_mut(&player_ip)
+                            .unwrap()
+                            .write_all(&resp)
+                            .unwrap();
+                    }
+                    ServerResponse::Fail(message, player_ip) => {
+                        let resp =
+                            bincode::serialize(&ServerResponse::Fail(message, player_ip)).unwrap();
+                        clients
+                            .get_mut(&player_ip)
+                            .unwrap()
+                            .write_all(&resp)
+                            .unwrap();
                     }
                     _ => {
                         tracing::error!("?????????");
@@ -243,6 +273,7 @@ fn main() {
                     tracing::error!("Failed to receive a value from the rx: {}", e);
                 }
             }
+            sleep(time::Duration::from_millis(500));
         }
     }
 }
