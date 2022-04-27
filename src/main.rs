@@ -6,6 +6,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread::sleep;
 
+use serde::__private::de::StrDeserializer;
 use serde::{Deserialize, Serialize};
 use threadpool::ThreadPool;
 
@@ -37,14 +38,14 @@ enum GameAction {
 enum ServerResponse {
     Ok(IpAddr),
     Fail(String, IpAddr),
-    Move(usize, usize),
+    Move(usize, usize, Option<String>),
     Reset,
 }
 
 struct Game {
     players: Vec<Player>,
     active_player: Option<usize>,
-    winner: Option<usize>,
+    winner: Option<String>,
     field: [usize; 255],
 }
 
@@ -64,25 +65,27 @@ impl Game {
         self.field = [0; 255];
     }
 
-    fn winner_check(&mut self, winner_id: usize, winner_color: usize) {
-        self.horizontal_check(winner_id, winner_color);
-        [14, 15, 16].map(|shift| self.shift_check(winner_id, winner_color, shift));
+    fn winner_check(&mut self, player_id: usize) {
+        self.horizontal_check(player_id);
+        [14, 15, 16].map(|shift| self.shift_check(player_id, shift));
     }
 
-    fn horizontal_check(&mut self, winner_id: usize, winner_color: usize) {
+    fn horizontal_check(&mut self, player_id: usize) {
+        let player = &self.players[player_id];
+
         let rows = self.field.chunks(15);
         for row in rows {
             let mut win_line = vec![];
             let mut idx = 0;
             while idx < row.len() {
                 let cell_color = row[idx];
-                if cell_color == winner_color {
+                if cell_color == player.color.unwrap() {
                     win_line.push(idx);
                 } else {
                     win_line = vec![];
                 }
                 if win_line.len() >= 5 {
-                    self.winner = Some(winner_id);
+                    self.winner = Some(player.name.clone());
                     return;
                 }
                 idx += 1;
@@ -90,9 +93,11 @@ impl Game {
         }
     }
 
-    fn shift_check(&mut self, winner_id: usize, winner_color: usize, shift: usize) {
+    fn shift_check(&mut self, player_id: usize, shift: usize) {
+        let player = &self.players[player_id];
         let mut idx = 0;
         let mut win_line = vec![];
+        let winner_color = player.color.unwrap();
         while idx < self.field.len() {
             if self.field[idx] != winner_color {
                 idx += 1;
@@ -104,7 +109,7 @@ impl Game {
             while i + shift < self.field.len() && self.field[i + shift] == winner_color {
                 win_line.push(i);
                 if win_line.len() >= 5 {
-                    self.winner = Some(winner_id);
+                    self.winner = Some(player.name.clone());
                     return;
                 }
                 i += shift;
@@ -131,39 +136,44 @@ fn handle_game_action(data: &[u8], game: Arc<RwLock<Game>>, player_ip: IpAddr) -
         }
 
         Ok(GameAction::Move(move_id, name)) => {
-            ServerResponse::Move(move_id, 1)
+            if game.read().unwrap().players.len() < 2 {
+                return ServerResponse::Fail(
+                    "Wait for a second player to connect".to_string(),
+                    player_ip,
+                );
+            }
 
-            // if game.read().unwrap().players.len() < 2 {
-            //     return ServerResponse::Fail("Wait for a second player to connect".to_string(), player_ip)
-            // }
+            let mut game = game.write().unwrap();
+            let (player_id, second_player_id) = if game.players[0].name == name {
+                (0_usize, 1_usize)
+            } else {
+                (1_usize, 0_usize)
+            };
+            if player_id != game.active_player.unwrap() {
+                return ServerResponse::Fail("It's not your move".to_string(), player_ip);
+            }
+            match game.active_player {
+                Some(active_player_id) => {
+                    if active_player_id == 0_usize {
+                        game.active_player = Some(1)
+                    } else {
+                        game.active_player = Some(0)
+                    };
+                }
+                None => {
+                    game.active_player = Some(second_player_id);
+                    game.players[player_id].color = Some(1_usize);
+                    game.players[second_player_id].color = Some(0_usize);
+                }
+            }
+            game.field[move_id] = player_id;
+            game.winner_check(player_id);
 
-            // let mut state = game.write().unwrap();
-            // let (player_id, second_player_id) = if state.players[0].name == name {
-            //     (0_usize, 1_usize)
-            // } else {
-            //     (1_usize, 0_usize)
-            // };
-            // if player_id != state.active_player.unwrap() {
-            //     return ServerResponse::Fail("It's not your move".to_string(), player_ip);
-            // }
-            // match state.active_player {
-            //     Some(active_player_id) => {
-            //         if active_player_id == 0_usize {
-            //             state.active_player = Some(1)
-            //         } else {
-            //             state.active_player = Some(0)
-            //         };
-            //     }
-            //     None => {
-            //         state.active_player = Some(second_player_id);
-            //         state.players[player_id].color = Some(1_usize);
-            //         state.players[second_player_id].color = Some(0_usize);
-            //     }
-            // }
-            // let player_color = state.players[player_id].color.unwrap();
-            // state.field[move_id] = player_id;
-            // state.winner_check(player_id, player_color);
-            // ServerResponse::Move(move_id, player_color)
+            ServerResponse::Move(
+                move_id,
+                game.players[player_id].color.unwrap(),
+                game.winner.clone(),
+            )
         }
         Err(e) => {
             panic!("{}", e)
@@ -233,17 +243,21 @@ fn main() {
         loop {
             match rx.recv() {
                 Ok(response) => match response {
-                    ServerResponse::Move(move_id, player_color) => {
-                        let resp = bincode::serialize(&ServerResponse::Move(move_id, player_color))
-                            .unwrap();
-                        for (ip, mut client) in &clients {
+                    ServerResponse::Move(move_id, player_color, winner) => {
+                        let resp = bincode::serialize(&ServerResponse::Move(
+                            move_id,
+                            player_color,
+                            winner,
+                        ))
+                        .unwrap();
+                        for mut client in clients.values() {
                             tracing::error!("{:?}", resp);
                             client.write_all(&resp).unwrap();
                         }
                     }
                     ServerResponse::Reset => {
                         let resp = bincode::serialize(&ServerResponse::Reset).unwrap();
-                        for (ip, mut client) in &clients {
+                        for mut client in clients.values() {
                             tracing::error!("{:?}", resp);
                             client.write_all(&resp).unwrap();
                         }
@@ -264,9 +278,6 @@ fn main() {
                             .unwrap()
                             .write_all(&resp)
                             .unwrap();
-                    }
-                    _ => {
-                        tracing::error!("?????????");
                     }
                 },
                 Err(e) => {
