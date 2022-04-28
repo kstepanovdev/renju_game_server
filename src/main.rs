@@ -198,7 +198,6 @@ fn main() {
             panic!("{}", e)
         }
     };
-    // let address = "0.0.0.0:3000";
     let listener = TcpListener::bind(address).unwrap();
     listener
         .set_nonblocking(true)
@@ -283,6 +282,6 @@ fn main() {
                 tracing::error!("Failed to receive a value from the rx: {}", e);
             }
         }
-        sleep(time::Duration::from_millis(300));
+        sleep(time::Duration::from_millis(100));
     }
 }
