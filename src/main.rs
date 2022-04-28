@@ -162,19 +162,17 @@ fn handle_game_action(data: &[u8], game: Arc<RwLock<Game>>, player_ip: IpAddr) -
                     };
                 }
                 None => {
-                    game.active_player = Some(second_player_id);
                     game.players[player_id].color = Some(1_usize);
-                    game.players[second_player_id].color = Some(0_usize);
+                    game.players[second_player_id].color = Some(2_usize);
+
+                    game.active_player = Some(second_player_id);
                 }
             }
-            game.field[move_id] = player_id;
+            let player_color = game.players[player_id].color.unwrap();
+            game.field[move_id] = player_color;
             game.winner_check(player_id);
 
-            ServerResponse::Move(
-                move_id,
-                game.players[player_id].color.unwrap(),
-                game.winner.clone(),
-            )
+            ServerResponse::Move(move_id, player_color, game.winner.clone())
         }
         Err(e) => {
             panic!("{}", e)
