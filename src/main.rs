@@ -148,11 +148,13 @@ fn handle_game_action(data: &[u8], game: Arc<RwLock<Game>>, player_ip: IpAddr) -
             } else {
                 (1_usize, 0_usize)
             };
-            if player_id != game.active_player.unwrap() {
-                return ServerResponse::Fail("It's not your move".to_string(), player_ip);
-            }
+
             match game.active_player {
                 Some(active_player_id) => {
+                    if player_id != game.active_player.unwrap() {
+                        return ServerResponse::Fail("It's not your move".to_string(), player_ip);
+                    };
+
                     if active_player_id == 0_usize {
                         game.active_player = Some(1)
                     } else {
@@ -261,8 +263,7 @@ fn main() {
                             }
                         }
                         ServerResponse::Ok(player_ip) => {
-                            let resp =
-                                bincode::serialize(&ServerResponse::Ok(player_ip)).unwrap();
+                            let resp = bincode::serialize(&ServerResponse::Ok(player_ip)).unwrap();
                             clients
                                 .get_mut(&player_ip)
                                 .unwrap()
