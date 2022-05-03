@@ -1,4 +1,4 @@
-## Multithreaded TCP game server for Renju
+## Multithreaded TCP-based game server for Renju
 
 ### Getting started
 First of all, you need to have Rust toolchain installed.
