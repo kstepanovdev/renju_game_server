@@ -1,21 +1,21 @@
+use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug)]
 struct Player {
-   ip: IpAddr,
-   name: String,
-   color: Option<usize>,
+    ip: IpAddr,
+    name: String,
+    color: Option<usize>,
 }
 
 impl Player {
-   fn new(name: String, ip: IpAddr) -> Self {
-       Player {
-           name,
-           color: None,
-           ip,
-       }
-   }
+    fn new(name: String, ip: IpAddr) -> Self {
+        Player {
+            name,
+            color: None,
+            ip,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -27,17 +27,26 @@ enum Command {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ServerResponse {
-    Ok { player_ip: IpAddr },
-    Fail { message: String, player_ip: IpAddr },
-    Move { move_id: usize, color: usize, winner: Option<String> },
+    Ok {
+        player_ip: IpAddr,
+    },
+    Fail {
+        message: String,
+        player_ip: IpAddr,
+    },
+    Move {
+        move_id: usize,
+        color: usize,
+        winner: Option<String>,
+    },
     Reset,
 }
 
 pub struct Game {
-  pub players: Vec<Player>,
-  pub active_player: Option<usize>,
-  pub winner: Option<String>,
-  pub field: [usize; 255],
+    pub players: Vec<Player>,
+    pub active_player: Option<usize>,
+    pub winner: Option<String>,
+    pub field: [usize; 255],
 }
 
 impl Game {
@@ -109,7 +118,7 @@ impl Game {
             idx += 1;
         }
     }
-    
+
     pub fn handle_action(&mut self, data: &[u8], player_ip: IpAddr) -> ServerResponse {
         let data = bincode::deserialize::<Command>(data);
         match data {
@@ -141,7 +150,10 @@ impl Game {
                 match self.active_player {
                     Some(active_player_id) => {
                         if player_id != self.active_player.unwrap() {
-                            return ServerResponse::Fail { message: "It's not your move".to_string(), player_ip };
+                            return ServerResponse::Fail {
+                                message: "It's not your move".to_string(),
+                                player_ip,
+                            };
                         };
 
                         if active_player_id == 0_usize {
@@ -161,7 +173,11 @@ impl Game {
                 self.field[move_id] = color;
                 self.winner_check(player_id);
 
-                ServerResponse::Move { move_id, color, winner: self.winner.clone() }
+                ServerResponse::Move {
+                    move_id,
+                    color,
+                    winner: self.winner.clone(),
+                }
             }
             Err(e) => {
                 panic!("{}", e)
