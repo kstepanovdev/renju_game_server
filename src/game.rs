@@ -2,10 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 #[derive(Debug)]
-struct Player {
-    ip: IpAddr,
-    name: String,
-    color: Option<usize>,
+pub struct Player {
+  pub  ip: IpAddr,
+  pub  name: String,
+  pub  color: Option<usize>,
 }
 
 impl Player {

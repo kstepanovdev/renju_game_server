@@ -82,7 +82,7 @@ async fn main() {
     let game = Arc::new(Mutex::new(Game::new()));
 
     loop {
-        let (stream, addr) = listener.accept().await?;
+        let (stream, addr) = listener.accept().await.unwrap();
         let state = Arc::clone(&state);
         let game = Arc::clone(&game);
 
