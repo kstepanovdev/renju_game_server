@@ -23,7 +23,6 @@ struct Shared {
     peers: HashMap<SocketAddr, Tx>,
 }
 impl Shared {
-    /// Create a new, empty, instance of `Shared`.
     fn new() -> Self {
         Shared {
             peers: HashMap::new(),
@@ -32,7 +31,7 @@ impl Shared {
 
     async fn broadcast(&mut self, response: Vec<u8>) {
         for peer in self.peers.iter_mut() {
-            let _ = peer.1.send(response.clone());
+            peer.1.send(response.clone()).unwrap();
         }
     }
 
@@ -105,7 +104,6 @@ async fn process(
 
     loop {
         tokio::select! {
-            // A message was received from a peer. Send it to the current user.
             Some(data) = peer.rx.recv() => {
                 let mut buf = BytesMut::with_capacity(64);
                 let data: &[u8] = &data;
@@ -129,16 +127,10 @@ async fn process(
         }
     }
 
-    // If this section is reached it means that the client was disconnected!
-    // Let's let everyone still connected know about it.
-    //     {
-    //         let mut state = state.lock().await;
-    //         state.peers.remove(&addr);
-
-    //         let msg = format!("{} has left the chat", username);
-    //         tracing::info!("{}", msg);
-    //         state.broadcast(addr, &msg).await;
-    //     }
+    {
+        let mut state = state.lock().await;
+        state.peers.remove(&addr);
+    }
 
     Ok(())
 }
