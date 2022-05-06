@@ -1,11 +1,9 @@
 use core::panic;
 use std::collections::HashMap;
-use std::io::{self, stdin, Read, Write};
-use std::net::IpAddr;
+use std::io::{self, stdin};
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
-
+use futures::SinkExt;
 use std::error::Error;
 use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
@@ -13,11 +11,13 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_stream::StreamExt;
 use tokio_util::codec::{BytesCodec, Framed};
 
+use bytes::{BufMut, BytesMut};
+
 mod game;
 use game::{Game, ServerResponse};
 
-type Tx = mpsc::UnboundedSender<String>;
-type Rx = mpsc::UnboundedReceiver<String>;
+type Tx = mpsc::UnboundedSender<Vec<u8>>;
+type Rx = mpsc::UnboundedReceiver<Vec<u8>>;
 
 struct Shared {
     peers: HashMap<SocketAddr, Tx>,
@@ -30,14 +30,14 @@ impl Shared {
         }
     }
 
-    /// Send a `LineCodec` encoded message to every peer, except
-    /// for the sender.
-    async fn broadcast(&mut self, sender: SocketAddr, message: &str) {
+    async fn broadcast(&mut self, response: Vec<u8>) {
         for peer in self.peers.iter_mut() {
-            if *peer.0 != sender {
-                let _ = peer.1.send(message.into());
-            }
+            let _ = peer.1.send(response.clone());
         }
+    }
+
+    async fn direct_message(&mut self, response: Vec<u8>, player_addr: SocketAddr) {
+        self.peers[&player_addr].send(response).unwrap();
     }
 }
 
@@ -100,32 +100,30 @@ async fn process(
     addr: SocketAddr,
     game: Arc<Mutex<Game>>,
 ) -> Result<(), Box<dyn Error>> {
-    let player_ip = stream.peer_addr().unwrap().ip();
-    let mut lines = Framed::new(stream, BytesCodec::new());
+    let lines = Framed::new(stream, BytesCodec::new());
     let mut peer = Peer::new(state.clone(), lines).await?;
 
     loop {
         tokio::select! {
             // A message was received from a peer. Send it to the current user.
-            // Some(msg) = peer.rx.recv() => {
-                // peer.lines.send(&msg).await?;
-            // }
+            Some(data) = peer.rx.recv() => {
+                let mut buf = BytesMut::with_capacity(64);
+                let data: &[u8] = &data;
+                buf.put(data);
+                peer.lines.send(buf).await?;
+            }
             result = peer.lines.next() => match result {
                 Some(Ok(data)) => {
-                    // let mut state = state.lock().await;
-                    // let msg = format!("{}: {}", username, msg);
-                    // state.broadcast(addr, &msg).await;
-                    let response = game.lock().await.handle_action(&data, player_ip);
+                    let response = game.lock().await.handle_action(&data, addr);
+                    handle_response(response, Arc::clone(&state)).await;
                 }
-                // An error occurred.
                 Some(Err(e)) => {
                     tracing::error!(
                         "an error occurred while processing messages for {}; error = {:?}",
-                        "kek",
+                        addr,
                         e
                     );
                 }
-                // The stream has been exhausted.
                 None => break,
             },
         }
@@ -145,68 +143,48 @@ async fn process(
     Ok(())
 }
 
-// // async fn process(socket: OwnedReadHalf, game: Arc<RwLock<Game>>, tx: Sender<ServerResponse>) {
-// //     let mut data = [0; 64];
-// //     let player_ip = socket.peer_addr().unwrap().ip();
-// //     socket.readable().await;
-// //     match socket.try_read(&mut data) {
-// //         Ok(size) => {
-// //             if size == 0 {
-// //                 return;
-//             }
+async fn handle_response(response: ServerResponse, state: Arc<Mutex<Shared>>) {
+    match response {
+        ServerResponse::Move {
+            move_id,
+            color,
+            winner,
+        } => {
+            let response = bincode::serialize(&ServerResponse::Move {
+                move_id,
+                color,
+                winner,
+            })
+            .unwrap();
 
-//             let response = game.write().unwrap().handle_action(&data, player_ip);
-//             tracing::error!("{:?}", response);
-//             if let Err(e) = tx.send(response) {
-//                 tracing::error!("Sending message to a transmitter failed: {}", e)
-//             };
-//         }
-//         Err(e) => {
-//             println!("Data read error: {}", e);
-//         }
-//     }
-// }
-
-// tokio::spawn(async move {
-//     // loop {
-//         match server_rx.try_recv() {
-//             Ok(response) => match response {
-//                 ServerResponse::Move {
-//                     move_id,
-//                     color,
-//                     winner,
-//                 } => {
-//                     let resp = bincode::serialize(&ServerResponse::Move {
-//                         move_id,
-//                         color,
-//                         winner,
-//                     })
-//                         .unwrap();
-//                     for (client, mut socket) in clients {
-//                         tracing::error!("{:?}", resp);
-//                         socket.write_all(&resp);
-//                     }
-//                 }
-//                 ServerResponse::Reset => {
-//                     let resp = bincode::serialize(&ServerResponse::Reset).unwrap();
-//                     for (addr, mut socket) in clients {
-//                         tracing::error!("{:?}", resp);
-//                         socket.write_all(&resp);
-//                     }
-//                 }
-//                 ServerResponse::Ok { player_ip } => {
-//                     let resp = bincode::serialize(&ServerResponse::Ok { player_ip }).unwrap();
-//                     clients.get_mut(&player_ip).unwrap().write_all(&resp);
-//                 }
-//                 ServerResponse::Fail { message, player_ip } => {
-//                     let resp =
-//                         bincode::serialize(&ServerResponse::Fail { message, player_ip }).unwrap();
-//                     clients.get_mut(&player_ip).unwrap().write_all(&resp);
-//                 }
-//             },
-//             Err(e) => {
-//                 tracing::error!("Failed to receive a value from the rx: {}", e);
-//             }
-//         }
-//     // }
-// });
+            state.lock().await.broadcast(response).await;
+        }
+        ServerResponse::Reset => {
+            let response = bincode::serialize(&ServerResponse::Reset).unwrap();
+            state.lock().await.broadcast(response).await;
+        }
+        ServerResponse::Ok { player_addr } => {
+            let response = bincode::serialize(&ServerResponse::Ok { player_addr }).unwrap();
+            state
+                .lock()
+                .await
+                .direct_message(response, player_addr)
+                .await;
+        }
+        ServerResponse::Fail {
+            message,
+            player_addr,
+        } => {
+            let response = bincode::serialize(&ServerResponse::Fail {
+                message,
+                player_addr,
+            })
+            .unwrap();
+            state
+                .lock()
+                .await
+                .direct_message(response, player_addr)
+                .await;
+        }
+    }
+}

@@ -1,19 +1,19 @@
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
+use std::net::SocketAddr;
 
 #[derive(Debug)]
 pub struct Player {
-  pub  ip: IpAddr,
-  pub  name: String,
-  pub  color: Option<usize>,
+    pub addr: SocketAddr,
+    pub name: String,
+    pub color: Option<usize>,
 }
 
 impl Player {
-    fn new(name: String, ip: IpAddr) -> Self {
+    fn new(name: String, addr: SocketAddr) -> Self {
         Player {
             name,
             color: None,
-            ip,
+            addr,
         }
     }
 }
@@ -28,11 +28,11 @@ enum Command {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ServerResponse {
     Ok {
-        player_ip: IpAddr,
+        player_addr: SocketAddr,
     },
     Fail {
         message: String,
-        player_ip: IpAddr,
+        player_addr: SocketAddr,
     },
     Move {
         move_id: usize,
@@ -119,7 +119,7 @@ impl Game {
         }
     }
 
-    pub fn handle_action(&mut self, data: &[u8], player_ip: IpAddr) -> ServerResponse {
+    pub fn handle_action(&mut self, data: &[u8], player_addr: SocketAddr) -> ServerResponse {
         let data = bincode::deserialize::<Command>(data);
         match data {
             Ok(Command::Reset) => {
@@ -128,16 +128,16 @@ impl Game {
             }
 
             Ok(Command::Connect { username }) => {
-                let new_player = Player::new(username, player_ip);
+                let new_player = Player::new(username, player_addr);
                 self.players.push(new_player);
-                ServerResponse::Ok { player_ip }
+                ServerResponse::Ok { player_addr }
             }
 
             Ok(Command::Move { move_id, username }) => {
                 if self.players.len() < 2 {
                     return ServerResponse::Fail {
                         message: "Wait for a second player to connect".to_string(),
-                        player_ip,
+                        player_addr,
                     };
                 }
 
@@ -152,7 +152,7 @@ impl Game {
                         if player_id != self.active_player.unwrap() {
                             return ServerResponse::Fail {
                                 message: "It's not your move".to_string(),
-                                player_ip,
+                                player_addr,
                             };
                         };
 
